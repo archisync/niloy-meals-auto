@@ -40,12 +40,17 @@ export async function GET() {
       return NextResponse.json({ data: null, updatedAt: null });
     }
 
+    const row = result.rows[0];
+    const data = row.data;
+    const updatedAt = row.updated_at;
+
     return NextResponse.json({
-      data: result.rows[0].data,
-      updatedAt: result.rows[0].updated_at,
+      data: typeof data === "string" ? data : String(data),
+      updatedAt: typeof updatedAt === "string" ? updatedAt : String(updatedAt),
     });
-  } catch {
-    return NextResponse.json({ data: null, updatedAt: null }, { status: 200 });
+  } catch (error) {
+    console.error("Failed to read app state", error);
+    return NextResponse.json({ error: "Failed to read state" }, { status: 500 });
   }
 }
 
@@ -65,19 +70,21 @@ export async function POST(request: Request) {
     await ensureSchema();
     const db = getTursoClient();
 
-    await db.execute({
+    const result = await db.execute({
       sql: `
         INSERT INTO app_state (id, data, updated_at)
         VALUES (?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           data = excluded.data,
           updated_at = excluded.updated_at
+        WHERE app_state.updated_at <= excluded.updated_at
       `,
       args: [STATE_ID, body.data, body.updatedAt],
     });
 
-    return NextResponse.json({ ok: true });
-  } catch {
-    return NextResponse.json({ ok: false }, { status: 202 });
+    return NextResponse.json({ ok: true, stale: result.rowsAffected === 0 });
+  } catch (error) {
+    console.error("Failed to write app state", error);
+    return NextResponse.json({ ok: false, error: "Failed to write state" }, { status: 500 });
   }
 }

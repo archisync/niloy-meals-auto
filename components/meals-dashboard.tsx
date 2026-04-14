@@ -40,15 +40,17 @@ const mealLabels: Record<MealName, string> = {
   dinner: "Dinner",
 };
 
+const defaultSettings: AppState["settings"] = {
+  breakfastPrice: 50,
+  lunchPrice: 100,
+  dinnerPrice: 80,
+  allowCustomMealPrice: false,
+};
+
 const defaultState: AppState = {
   months: {},
-  settings: {
-    breakfastPrice: 50,
-    lunchPrice: 100,
-    dinnerPrice: 80,
-    allowCustomMealPrice: false,
-  },
-  updatedAt: new Date().toISOString(),
+  settings: defaultSettings,
+  updatedAt: new Date(0).toISOString(),
 };
 
 function loadLocalState() {
@@ -62,6 +64,23 @@ function loadLocalState() {
   }
 
   return JSON.parse(local) as AppState;
+}
+
+function hasMeaningfulLocalData(state: AppState) {
+  const hasTrackedMealsOrMoney = Object.values(state.months).some(
+    (month) => Object.keys(month.days).length > 0 || month.moneyEntries.length > 0,
+  );
+
+  if (hasTrackedMealsOrMoney) {
+    return true;
+  }
+
+  return (
+    state.settings.breakfastPrice !== defaultSettings.breakfastPrice ||
+    state.settings.lunchPrice !== defaultSettings.lunchPrice ||
+    state.settings.dinnerPrice !== defaultSettings.dinnerPrice ||
+    state.settings.allowCustomMealPrice !== defaultSettings.allowCustomMealPrice
+  );
 }
 
 function getCurrentMonthKey() {
@@ -134,10 +153,26 @@ function getPrice(settings: AppState["settings"], meal: MealName, record?: MealR
 
 function buildMonthMetrics(state: AppState, monthKey: string) {
   const month = state.months[monthKey] ?? { days: {}, moneyEntries: [] };
-  const latestDoneDate = Object.keys(month.days)
-    .filter((key) => ["breakfast", "lunch", "dinner"].some((meal) => month.days[key][meal as MealName]?.done))
+  const mealOrder: MealName[] = ["breakfast", "lunch", "dinner"];
+  let latestDonePoint: { dateKey: string; meal: MealName } | null = null;
+
+  Object.keys(month.days)
     .sort()
-    .at(-1);
+    .forEach((dateKey) => {
+      mealOrder.forEach((meal) => {
+        if (!month.days[dateKey]?.[meal]?.done) {
+          return;
+        }
+
+        if (
+          !latestDonePoint ||
+          dateKey > latestDonePoint.dateKey ||
+          (dateKey === latestDonePoint.dateKey && mealOrder.indexOf(meal) > mealOrder.indexOf(latestDonePoint.meal))
+        ) {
+          latestDonePoint = { dateKey, meal };
+        }
+      });
+    });
 
   let monthlyCost = 0;
   const statuses: Record<string, Record<MealName, MealStatus>> = {};
@@ -157,7 +192,12 @@ function buildMonthMetrics(state: AppState, monthKey: string) {
     (Object.keys(mealLabels) as MealName[]).forEach((meal) => {
       if (dayRecord[meal]?.done) {
         statuses[dateKey][meal] = "done";
-      } else if (latestDoneDate && dateKey < latestDoneDate) {
+      } else if (
+        latestDonePoint &&
+        (dateKey < latestDonePoint.dateKey ||
+          (dateKey === latestDonePoint.dateKey &&
+            mealOrder.indexOf(meal) < mealOrder.indexOf(latestDonePoint.meal)))
+      ) {
         statuses[dateKey][meal] = "missed";
       }
     });
@@ -239,21 +279,27 @@ export function MealsDashboard() {
   const [customTarget, setCustomTarget] = useState<{ dateKey: string; meal: MealName } | null>(null);
   const [customPrice, setCustomPrice] = useState("");
   const longPressTimer = useRef<number | null>(null);
-  const hasLoaded = useRef(false);
+  const [hasLoaded, setHasLoaded] = useState(false);
 
   useEffect(() => {
     fetch("/api/state")
       .then((response) => (response.ok ? response.json() : null))
       .then((payload: { data: string | null; updatedAt: string | null } | null) => {
         if (!payload?.data || !payload.updatedAt) {
-          hasLoaded.current = true;
+          setHasLoaded(true);
           return;
         }
 
         const remote = JSON.parse(payload.data) as AppState;
         const updatedAt = payload.updatedAt;
         setState((current) => {
-          if (!current.updatedAt || current.updatedAt < updatedAt) {
+          const shouldUseRemoteForEmptyLocal = !hasMeaningfulLocalData(current) && current.updatedAt !== updatedAt;
+
+          if (
+            !current.updatedAt ||
+            current.updatedAt < updatedAt ||
+            shouldUseRemoteForEmptyLocal
+          ) {
             localStorage.setItem(STORAGE_KEY, payload.data as string);
             setSettingsDraft(remote.settings);
             return remote;
@@ -261,15 +307,15 @@ export function MealsDashboard() {
           return current;
         });
 
-        hasLoaded.current = true;
+        setHasLoaded(true);
       })
       .catch(() => {
-        hasLoaded.current = true;
+        setHasLoaded(true);
       });
   }, []);
 
   useEffect(() => {
-    if (!hasLoaded.current) {
+    if (!hasLoaded) {
       return;
     }
 
@@ -284,13 +330,18 @@ export function MealsDashboard() {
           updatedAt: state.updatedAt,
         }),
       })
+        .then(async (response) => {
+          if (!response.ok) {
+            throw new Error(`Sync failed (${response.status}): ${await response.text()}`);
+          }
+        })
         .catch((error) => {
           console.error("Background sync failed", error);
         });
     }, SYNC_DEBOUNCE_MS);
 
     return () => window.clearTimeout(timeout);
-  }, [state]);
+  }, [hasLoaded, state]);
 
   const monthOptions = useMemo(() => {
     const set = new Set([...Object.keys(state.months), getCurrentMonthKey(), selectedMonth]);
@@ -568,23 +619,23 @@ export function MealsDashboard() {
           </div>
 
           <div>
-            <table className="w-full border-collapse text-xs sm:text-sm">
+            <table className="w-full border-collapse text-xs sm:text-sm md:table-fixed">
               <thead>
                 <tr className="border-b border-violet-300/20 text-left">
-                  <th className="py-2 pr-1 sm:pr-2">Date and Day</th>
-                  <th className="py-2 text-center md:w-24">
+                  <th className="py-2 pr-1 sm:pr-2 md:w-1/5">Date and Day</th>
+                  <th className="py-2 text-center md:w-1/5">
                     <span className="md:hidden">B</span>
                     <span className="hidden md:inline">Breakfast</span>
                   </th>
-                  <th className="py-2 text-center md:w-24">
+                  <th className="py-2 text-center md:w-1/5">
                     <span className="md:hidden">L</span>
                     <span className="hidden md:inline">Lunch</span>
                   </th>
-                  <th className="py-2 text-center md:w-24">
+                  <th className="py-2 text-center md:w-1/5">
                     <span className="md:hidden">D</span>
                     <span className="hidden md:inline">Dinner</span>
                   </th>
-                  <th className="py-2 text-center md:w-28">
+                  <th className="py-2 text-center md:w-1/5">
                     <span className="md:hidden">T</span>
                     <span className="hidden md:inline">Total Cost</span>
                   </th>
@@ -599,9 +650,9 @@ export function MealsDashboard() {
 
                   return (
                     <tr key={dateKey} className="border-b border-violet-300/10">
-                      <td className="py-2 pr-1 font-medium sm:pr-2">{day} {getDayLabel(selectedMonth, day)}</td>
+                      <td className="py-2 pr-1 font-medium sm:pr-2 md:w-1/5">{day} {getDayLabel(selectedMonth, day)}</td>
                       {(Object.keys(mealLabels) as MealName[]).map((meal) => (
-                        <td key={meal} className="py-2 text-center">
+                        <td key={meal} className="py-2 text-center md:w-1/5">
                           <button
                             type="button"
                             onClick={() => onToggleMeal(dateKey, meal)}
@@ -625,7 +676,7 @@ export function MealsDashboard() {
                           </button>
                         </td>
                       ))}
-                      <td className="py-2 text-center font-semibold">{metrics.dayTotal[dateKey].toFixed(2)}</td>
+                      <td className="py-2 text-center font-semibold md:w-1/5">{metrics.dayTotal[dateKey].toFixed(2)}</td>
                     </tr>
                   );
                 })}
