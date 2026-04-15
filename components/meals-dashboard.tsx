@@ -361,6 +361,10 @@ export function MealsDashboard() {
   const resolvedMoneyDate = moneyDate.startsWith(selectedMonth) ? moneyDate : `${selectedMonth}-01`;
 
   useEffect(() => {
+    if (!hasLoaded) {
+      return;
+    }
+
     if (moneyLeft > 0) {
       return;
     }
@@ -370,7 +374,7 @@ export function MealsDashboard() {
       sessionStorage.setItem(key, "yes");
       window.alert("Your submitted money has run out, please recharge or please add money.");
     }
-  }, [moneyLeft, selectedMonth]);
+  }, [hasLoaded, moneyLeft, selectedMonth]);
 
   const updateState = (updater: (current: AppState) => AppState) => {
     setState((current) => {
